@@ -36,6 +36,8 @@ def eccentricity_control(
     target_eccentricity: float = 0.0,
     target_mean_anomaly_fraction: Optional[float] = None,
     plot_output_dir: Optional[Union[str, Path]] = None,
+    opt_freq_filter: bool = True,
+    opt_varpro: bool = True,
 ) -> Tuple[float, float, Dict[OrbitalParams, float]]:
     """Compute eccentricity and new orbital parameters for a binary system
 
@@ -67,6 +69,8 @@ def eccentricity_control(
         the value 1 corresponds to the pericenter again. Currently this is
         unused because only an eccentricity of 0 is supported.
       plot_output_dir: (Optional) Output directory for plots.
+      opt_freq_filter: (Optional) Whether to apply frequency filter.
+      opt_varpro: (Optional) Whether to apply variable projection.
 
     Returns:
         Tuple of eccentricity, eccentricity error, and dictionary of updated
@@ -148,8 +152,8 @@ def eccentricity_control(
             tmin=tmin,
             tmax=tmax,
             tref=tmin,
-            opt_freq_filter=True,
-            opt_varpro=True,
+            opt_freq_filter=opt_freq_filter,
+            opt_varpro=opt_varpro,
             opt_type="bbh",
             opt_tmin=tmin,
             opt_improved_Omega0_update=True,
@@ -229,6 +233,16 @@ def eccentricity_control(
     "--plot-output-dir",
     type=click.Path(writable=True),
     help="Output directory for plots.",
+)
+@click.option(
+    "--opt-freq-filter",
+    default=True,
+    help="Whether to apply frequency filter.",
+)
+@click.option(
+    "--opt-varpro",
+    default=True,
+    help="Whether to apply variable projection.",
 )
 def eccentricity_control_command(**kwargs):
     _rich_traceback_guard = True  # Hide traceback until here
