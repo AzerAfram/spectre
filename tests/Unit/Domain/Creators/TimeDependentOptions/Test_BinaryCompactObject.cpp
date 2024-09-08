@@ -14,6 +14,7 @@
 #include "Domain/Creators/TimeDependentOptions/BinaryCompactObject.hpp"
 #include "Domain/FunctionsOfTime/FixedSpeedCubic.hpp"
 #include "Domain/FunctionsOfTime/FunctionOfTime.hpp"
+#include "Domain/FunctionsOfTime/IntegratedFunctionOfTime.hpp"
 #include "Domain/FunctionsOfTime/PiecewisePolynomial.hpp"
 #include "Domain/FunctionsOfTime/QuaternionFunctionOfTime.hpp"
 #include "NumericalAlgorithms/SphericalHarmonics/Spherepack.hpp"
@@ -271,6 +272,12 @@ void test(const bool include_expansion, const bool include_rotation,
 
   const std::array<std::array<double, 3>, 2> centers{
       std::array{5.0, 0.01, 0.02}, std::array{-5.0, -0.01, -0.02}};
+  const std::optional<std::array<double, 3>> cube_a_center =
+      IsCylindrical ? std::optional<std::array<double, 3>>{}
+                    : std::array<double, 3>{{4.25, -0.3, 0.2}};
+  const std::optional<std::array<double, 3>> cube_b_center =
+      IsCylindrical ? std::optional<std::array<double, 3>>{}
+                    : std::array<double, 3>{{-4.25, 0.4, -0.15}};
   const double domain_envelope_radius = 15.0;
   const double domain_outer_radius = 20.0;
 
@@ -324,10 +331,11 @@ void test(const bool include_expansion, const bool include_rotation,
     }
     const auto build_maps = [&time_dep_options, &centers, &inner_outer_radii_A,
                              &inner_outer_radii_B, &domain_envelope_radius,
-                             &domain_outer_radius]() {
-      time_dep_options.build_maps(centers, inner_outer_radii_A,
-                                  inner_outer_radii_B, domain_envelope_radius,
-                                  domain_outer_radius);
+                             &domain_outer_radius, &cube_a_center,
+                             &cube_b_center]() {
+      time_dep_options.build_maps(centers, cube_a_center, cube_b_center,
+                                  inner_outer_radii_A, inner_outer_radii_B,
+                                  domain_envelope_radius, domain_outer_radius);
     };
 
     // If we have excision info, but didn't specify shape map options, we
@@ -583,7 +591,7 @@ void test_errors() {
             ShapeMapBOptions<IsCylindrical>{8, {}}};
         time_dep_opts.build_maps(
             std::array{std::array{0.0, 0.0, 0.0}, std::array{0.0, 0.0, 0.0}},
-            radii, std::nullopt, 25.0, 100.0);
+            std::nullopt, std::nullopt, radii, std::nullopt, 25.0, 100.0);
       }()),
       Catch::Matchers::ContainsSubstring(
           "Trying to build the shape map for object " +
@@ -599,11 +607,29 @@ void test_errors() {
             std::nullopt};
         time_dep_opts.build_maps(
             std::array{std::array{0.0, 0.0, 0.0}, std::array{0.0, 0.0, 0.0}},
-            radii, radii, 25.0, 100.0);
+            std::nullopt, std::nullopt, radii, radii, 25.0, 100.0);
       }()),
       Catch::Matchers::ContainsSubstring(
           "Trying to build the shape map for object " +
           get_output(domain::ObjectLabel::B)));
+  if (IsCylindrical) {
+    CHECK_THROWS_WITH(
+        ([&radii]() {
+          TimeDependentMapOptions<IsCylindrical> time_dep_opts{
+              1.0,
+              ExpMapOptions<IsCylindrical>{{1.0, 0.0}, 0.0, 0.01},
+              RotMapOptions<IsCylindrical>{{0.0, 0.0, 0.0}},
+              std::nullopt,
+              ShapeMapAOptions<IsCylindrical>{8, {}},
+              std::nullopt};
+          time_dep_opts.build_maps(
+              std::array{std::array{5.0, 0.0, 0.0}, std::array{-5.0, 0.0, 0.0}},
+              {{7.5, 0.0, 0.0}}, {{-7.5, 0.0, 0.0}}, radii, radii, 25.0, 100.0);
+        }()),
+        Catch::Matchers::ContainsSubstring(
+            "When using the CylindricalBinaryCompactObject domain creator, "
+            "the excision centers cannot be offset."));
+  }
   CHECK_THROWS_WITH(
       TimeDependentMapOptions<IsCylindrical>{}
           .template grid_to_distorted_map<domain::ObjectLabel::A>(true),
@@ -637,6 +663,98 @@ void test_errors() {
 #endif
 }
 
+void test_worldtube_fots() {
+  const std::array<double, 3> size_a_opts{{1.3, 1.2, 1.1}};
+  const std::array<double, 3> size_b_opts{{1.4, 1.5, 1.6}};
+  const double initial_time = 0.0;
+
+  const double initial_expansion = 1.2;
+  const double initial_expansion_deriv = 2.2;
+
+  const TimeDependentMapOptions<false> worldtube_options{
+      initial_time,
+      ExpMapOptions<false>{
+          {initial_expansion, initial_expansion_deriv}, 1., 1.},
+      RotMapOptions<false>{{0.0, 0.0, 1.0}},
+      std::nullopt,
+      ShapeMapAOptions<false>{2, {}, std::make_optional(size_a_opts)},
+      ShapeMapBOptions<false>{2, {}, std::make_optional(size_b_opts)}};
+  const auto fots = worldtube_options.create_functions_of_time<true>({});
+  CHECK(not fots.contains("Translation"));
+
+  CHECK(fots.contains("Rotation"));
+  const auto& rotation_fot = fots.at("Rotation");
+  CHECK(dynamic_cast<domain::FunctionsOfTime::IntegratedFunctionOfTime*>(
+      &*rotation_fot));
+  CHECK(rotation_fot->time_bounds() ==
+        std::array<double, 2>{{initial_time, initial_time + 1e-10}});
+  const DataVector rotation_value{1., 0., 0., 0.};
+  const DataVector rotation_deriv_value{0., 0., 0., 0.5};
+  CHECK_ITERABLE_APPROX(rotation_fot->func(initial_time)[0], rotation_value);
+  CHECK_ITERABLE_APPROX(rotation_fot->func_and_deriv(initial_time)[1],
+                        rotation_deriv_value);
+
+  CHECK(fots.contains("Expansion"));
+  const auto& expansion_fot = fots.at("Expansion");
+  CHECK(dynamic_cast<domain::FunctionsOfTime::IntegratedFunctionOfTime*>(
+      &*expansion_fot));
+  CHECK(expansion_fot->time_bounds() ==
+        std::array<double, 2>{{initial_time, initial_time + 1e-10}});
+  const DataVector expansion_value{initial_expansion};
+  const DataVector expansion_deriv_value{initial_expansion_deriv};
+  CHECK_ITERABLE_APPROX(expansion_fot->func(initial_time)[0], expansion_value);
+  CHECK_ITERABLE_APPROX(expansion_fot->func_and_deriv(initial_time)[1],
+                        expansion_deriv_value);
+
+  CHECK(fots.contains("ExpansionOuterBoundary"));
+  const auto& boundary_expansion = fots.at("ExpansionOuterBoundary");
+  CHECK(dynamic_cast<domain::FunctionsOfTime::FixedSpeedCubic*>(
+      &*boundary_expansion));
+  CHECK(boundary_expansion->time_bounds() ==
+        std::array<double, 2>{
+            {initial_time, std::numeric_limits<double>::infinity()}});
+
+  CHECK(fots.contains("SizeA"));
+  const auto& size_a_fot = fots.at("SizeA");
+  CHECK(dynamic_cast<domain::FunctionsOfTime::IntegratedFunctionOfTime*>(
+      &*size_a_fot));
+  CHECK(size_a_fot->time_bounds() ==
+        std::array<double, 2>{{initial_time, initial_time + 1e-10}});
+  const DataVector size_a_value{size_a_opts[0]};
+  const DataVector size_a_deriv_value{size_a_opts[1]};
+  CHECK_ITERABLE_APPROX(size_a_fot->func(initial_time)[0], size_a_value);
+  CHECK_ITERABLE_APPROX(size_a_fot->func_and_deriv(initial_time)[1],
+                        size_a_deriv_value);
+
+  CHECK(fots.contains("SizeB"));
+  const auto& size_b_fot = fots.at("SizeB");
+  CHECK(dynamic_cast<domain::FunctionsOfTime::IntegratedFunctionOfTime*>(
+      &*size_b_fot));
+  CHECK(size_b_fot->time_bounds() ==
+        std::array<double, 2>{{initial_time, initial_time + 1e-10}});
+  const DataVector size_b_value{size_b_opts[0]};
+  const DataVector size_b_deriv_value{size_b_opts[1]};
+  CHECK_ITERABLE_APPROX(size_b_fot->func(initial_time)[0], size_b_value);
+  CHECK_ITERABLE_APPROX(size_b_fot->func_and_deriv(initial_time)[1],
+                        size_b_deriv_value);
+
+  CHECK(fots.contains("ShapeA"));
+  const auto& shape_a_fot = fots.at("ShapeA");
+  CHECK(dynamic_cast<domain::FunctionsOfTime::PiecewisePolynomial<2>*>(
+      &*shape_a_fot));
+  CHECK(shape_a_fot->time_bounds() ==
+        std::array<double, 2>{
+            {initial_time, std::numeric_limits<double>::infinity()}});
+
+  CHECK(fots.contains("ShapeB"));
+  const auto& shape_b_fot = fots.at("ShapeB");
+  CHECK(dynamic_cast<domain::FunctionsOfTime::PiecewisePolynomial<2>*>(
+      &*shape_b_fot));
+  CHECK(shape_b_fot->time_bounds() ==
+        std::array<double, 2>{
+            {initial_time, std::numeric_limits<double>::infinity()}});
+}
+
 }  // namespace
 
 // [[TimeOut, 45]]
@@ -657,5 +775,6 @@ SPECTRE_TEST_CASE(
   check_names<false>();
   test_errors<true>();
   test_errors<false>();
+  test_worldtube_fots();
 }
 }  // namespace domain::creators::bco

@@ -37,6 +37,7 @@ PhaseChangeAndTriggers:
 Evolution:
   InitialTime: 0.0
   InitialTimeStep: 0.0001
+  MinimumTimeStep: 1e-7
   TimeStepper: Rk5Tsitouras
 
 DomainCreator:
@@ -59,6 +60,7 @@ DomainCreator:
         ExciseWithBoundaryCondition: Worldtube
       UseLogarithmicMap: false
     CenterOfMassOffset: [0., 0.]
+    CubeScale: 1.0
     Envelope:
       RadialDistribution: Linear
       Radius: 50.

@@ -42,6 +42,7 @@
 #include "Domain/FunctionsOfTime/QuaternionFunctionOfTime.hpp"
 #include "Domain/Structure/BlockNeighbor.hpp"
 #include "Options/ParseError.hpp"
+#include "Utilities/EqualWithinRoundoff.hpp"
 #include "Utilities/MakeArray.hpp"
 
 namespace Frame {
@@ -64,14 +65,16 @@ create_grid_anchors(const std::array<double, 3>& center_a,
 }
 }  // namespace bco
 
-bool BinaryCompactObject::Object::is_excised() const {
+template <bool UseWorldtube>
+bool BinaryCompactObject<UseWorldtube>::Object::is_excised() const {
   return inner_boundary_condition.has_value();
 }
 
-BinaryCompactObject::BinaryCompactObject(
+template <bool UseWorldtube>
+BinaryCompactObject<UseWorldtube>::BinaryCompactObject(
     typename ObjectA::type object_A, typename ObjectB::type object_B,
     std::array<double, 2> center_of_mass_offset, const double envelope_radius,
-    const double outer_radius,
+    const double outer_radius, const double cube_scale,
     const typename InitialRefinement::type& initial_refinement,
     const typename InitialGridPoints::type& initial_number_of_grid_points,
     const bool use_equiangular_map,
@@ -111,9 +114,30 @@ BinaryCompactObject::BinaryCompactObject(
   // Determination of parameters for domain construction:
   const double tan_half_opening_angle = tan(0.5 * opening_angle_);
   translation_ = 0.5 * (x_coord_a_ + x_coord_b_);
-  length_inner_cube_ = abs(x_coord_a_ - x_coord_b_);
+  length_inner_cube_ = cube_scale * (x_coord_a_ - x_coord_b_);
+  if (length_inner_cube_ < (x_coord_a_ - x_coord_b_)) {
+    PARSE_ERROR(
+        context,
+        "The cube length should be greater than or equal to the initial "
+        "separation between the two objects.");
+  }
   length_outer_cube_ =
       2.0 * envelope_radius_ / sqrt(2.0 + square(tan_half_opening_angle));
+
+  // We chose to handle potential roundoff differences here by using equal
+  // within roundoff instead of exact equality because the wedge map expects
+  // exact equality when checking for a zero offset.
+  if (equal_within_roundoff(length_inner_cube_, (x_coord_a_ - x_coord_b_),
+                            std::numeric_limits<double>::epsilon() * 100.0,
+                            length_inner_cube_)) {
+    offset_x_coord_a_ = 0.0;
+    offset_x_coord_b_ = 0.0;
+  } else {
+    offset_x_coord_a_ =
+        x_coord_a_ - (x_coord_a_ + x_coord_b_ + length_inner_cube_) * 0.5;
+    offset_x_coord_b_ =
+        x_coord_b_ - (x_coord_a_ + x_coord_b_ - length_inner_cube_) * 0.5;
+  }
 
   // Calculate number of blocks
   // Object cubes and shells have 6 blocks each, for a total for 24 blocks.
@@ -200,6 +224,16 @@ BinaryCompactObject::BinaryCompactObject(
           "or neither.");
     }
   }
+  const bool filled_excision_a = not(use_single_block_a_ or is_excised_a_);
+  const bool filled_excision_b = not(use_single_block_b_ or is_excised_b_);
+  if ((filled_excision_a or filled_excision_b) and
+      not equal_within_roundoff(offset_x_coord_a_, 0.0)) {
+    PARSE_ERROR(context,
+                "Setting CubeScale > 1.0 is not supported for domains with "
+                "ExciseInterior = False. Consider using "
+                "CartesianCubeAtX for the Object without an excised interior.");
+  }
+
   if (envelope_radius_ >= outer_radius_) {
     PARSE_ERROR(context,
                 "The outer radius must be larger than the envelope radius.");
@@ -327,16 +361,30 @@ BinaryCompactObject::BinaryCompactObject(
   }
 
   if (time_dependent_options_.has_value()) {
+    // The reason we don't just always use half the inner cube length is to
+    // avoid potential roundoff issues if there is no offset
+    const std::optional<std::array<double, 3>> cube_A_center =
+        length_inner_cube_ == x_coord_a_ - x_coord_b_
+            ? std::optional<std::array<double, 3>>{}
+            : std::array{translation_ + 0.5 * length_inner_cube_,
+                         center_of_mass_offset_[0], center_of_mass_offset_[1]};
+    const std::optional<std::array<double, 3>> cube_B_center =
+        length_inner_cube_ == x_coord_a_ - x_coord_b_
+            ? std::optional<std::array<double, 3>>{}
+            : std::array{translation_ - 0.5 * length_inner_cube_,
+                         center_of_mass_offset_[0], center_of_mass_offset_[1]};
     time_dependent_options_->build_maps(
         std::array{std::array{x_coord_a_, center_of_mass_offset_[0],
                               center_of_mass_offset_[1]},
                    std::array{x_coord_b_, center_of_mass_offset_[0],
                               center_of_mass_offset_[1]}},
-        radii_A, radii_B, envelope_radius_, outer_radius_);
+        cube_A_center, cube_B_center, radii_A, radii_B, envelope_radius_,
+        outer_radius_);
   }
 }
 
-Domain<3> BinaryCompactObject::create_domain() const {
+template <bool UseWorldtube>
+Domain<3> BinaryCompactObject<UseWorldtube>::create_domain() const {
   const double inner_sphericity_A = is_excised_a_ ? 1.0 : 0.0;
   const double inner_sphericity_B = is_excised_b_ ? 1.0 : 0.0;
 
@@ -361,13 +409,15 @@ Domain<3> BinaryCompactObject::create_domain() const {
 
   // ObjectA/B is on the right/left, respectively.
   const Affine3D translation_A{
-      Affine{-1.0, 1.0, -1.0 + x_coord_a_, 1.0 + x_coord_a_},
+      Affine{-1.0, 1.0, -1.0 + x_coord_a_ - offset_x_coord_a_,
+             1.0 + x_coord_a_ - offset_x_coord_a_},
       Affine{-1.0, 1.0, -1.0 + center_of_mass_offset_[0],
              1.0 + center_of_mass_offset_[0]},
       Affine{-1.0, 1.0, -1.0 + center_of_mass_offset_[1],
              1.0 + center_of_mass_offset_[1]}};
   const Affine3D translation_B{
-      Affine{-1.0, 1.0, -1.0 + x_coord_b_, 1.0 + x_coord_b_},
+      Affine{-1.0, 1.0, -1.0 + x_coord_b_ - offset_x_coord_b_,
+             1.0 + x_coord_b_ - offset_x_coord_b_},
       Affine{-1.0, 1.0, -1.0 + center_of_mass_offset_[0],
              1.0 + center_of_mass_offset_[0]},
       Affine{-1.0, 1.0, -1.0 + center_of_mass_offset_[1],
@@ -377,8 +427,9 @@ Domain<3> BinaryCompactObject::create_domain() const {
   if (use_single_block_a_) {
     maps.emplace_back(
         make_coordinate_map_base<Frame::BlockLogical, Frame::Inertial>(Affine3D{
-            Affine(-1.0, 1.0, -0.5 * length_inner_cube_ + x_coord_a_,
-                   0.5 * length_inner_cube_ + x_coord_a_),
+            Affine(-1.0, 1.0,
+                   -0.5 * length_inner_cube_ + x_coord_a_ - offset_x_coord_a_,
+                   0.5 * length_inner_cube_ + x_coord_a_ - offset_x_coord_a_),
             Affine(-1.0, 1.0,
                    -0.5 * length_inner_cube_ + center_of_mass_offset_[0],
                    0.5 * length_inner_cube_ + center_of_mass_offset_[0]),
@@ -391,21 +442,26 @@ Domain<3> BinaryCompactObject::create_domain() const {
     // Each object is surrounded by 6 inner wedges that make a sphere, and
     // another 6 outer wedges that transition to a cube.
     const auto& object_a = std::get<Object>(object_A_);
-
+    const auto& offset_a_optional =
+        offset_x_coord_a_ == 0
+            ? std::nullopt
+            : std::make_optional(std::make_pair(
+                  length_inner_cube_ * 0.5,
+                  std::array<double, 3>{{offset_x_coord_a_, 0.0, 0.0}}));
     Maps maps_center_A =
         domain::make_vector_coordinate_map_base<Frame::BlockLogical,
                                                 Frame::Inertial, 3>(
-            sph_wedge_coordinate_maps(object_a.inner_radius,
-                                      object_a.outer_radius, inner_sphericity_A,
-                                      1.0, use_equiangular_map_, false, {},
-                                      object_A_radial_distribution),
+            sph_wedge_coordinate_maps(
+                object_a.inner_radius, object_a.outer_radius,
+                inner_sphericity_A, 1.0, use_equiangular_map_,
+                offset_a_optional, false, {}, object_A_radial_distribution),
             translation_A);
     Maps maps_cube_A =
         domain::make_vector_coordinate_map_base<Frame::BlockLogical,
                                                 Frame::Inertial, 3>(
-            sph_wedge_coordinate_maps(object_a.outer_radius,
-                                      sqrt(3.0) * 0.5 * length_inner_cube_, 1.0,
-                                      0.0, use_equiangular_map_),
+            sph_wedge_coordinate_maps(
+                object_a.outer_radius, sqrt(3.0) * 0.5 * length_inner_cube_,
+                1.0, 0.0, use_equiangular_map_, offset_a_optional),
             translation_A);
     std::move(maps_center_A.begin(), maps_center_A.end(),
               std::back_inserter(maps));
@@ -414,8 +470,9 @@ Domain<3> BinaryCompactObject::create_domain() const {
   if (use_single_block_b_) {
     maps.emplace_back(
         make_coordinate_map_base<Frame::BlockLogical, Frame::Inertial>(Affine3D{
-            Affine(-1.0, 1.0, -0.5 * length_inner_cube_ + x_coord_b_,
-                   0.5 * length_inner_cube_ + x_coord_b_),
+            Affine(-1.0, 1.0,
+                   -0.5 * length_inner_cube_ + x_coord_b_ - offset_x_coord_b_,
+                   0.5 * length_inner_cube_ + x_coord_b_ - offset_x_coord_b_),
             Affine(-1.0, 1.0,
                    -0.5 * length_inner_cube_ + center_of_mass_offset_[0],
                    0.5 * length_inner_cube_ + center_of_mass_offset_[0]),
@@ -428,20 +485,26 @@ Domain<3> BinaryCompactObject::create_domain() const {
     // Each object is surrounded by 6 inner wedges that make a sphere, and
     // another 6 outer wedges that transition to a cube.
     const auto& object_b = std::get<Object>(object_B_);
+    const auto& offset_b_optional =
+        offset_x_coord_b_ == 0
+            ? std::nullopt
+            : std::make_optional(std::make_pair(
+                  length_inner_cube_ * 0.5,
+                  std::array<double, 3>{{offset_x_coord_b_, 0.0, 0.0}}));
     Maps maps_center_B =
         domain::make_vector_coordinate_map_base<Frame::BlockLogical,
                                                 Frame::Inertial, 3>(
-            sph_wedge_coordinate_maps(object_b.inner_radius,
-                                      object_b.outer_radius, inner_sphericity_B,
-                                      1.0, use_equiangular_map_, false, {},
-                                      object_B_radial_distribution),
+            sph_wedge_coordinate_maps(
+                object_b.inner_radius, object_b.outer_radius,
+                inner_sphericity_B, 1.0, use_equiangular_map_,
+                offset_b_optional, false, {}, object_B_radial_distribution),
             translation_B);
     Maps maps_cube_B =
         domain::make_vector_coordinate_map_base<Frame::BlockLogical,
                                                 Frame::Inertial, 3>(
-            sph_wedge_coordinate_maps(object_b.outer_radius,
-                                      sqrt(3.0) * 0.5 * length_inner_cube_, 1.0,
-                                      0.0, use_equiangular_map_),
+            sph_wedge_coordinate_maps(
+                object_b.outer_radius, sqrt(3.0) * 0.5 * length_inner_cube_,
+                1.0, 0.0, use_equiangular_map_, offset_b_optional),
             translation_B);
     std::move(maps_center_B.begin(), maps_center_B.end(),
               std::back_inserter(maps));
@@ -469,10 +532,13 @@ Domain<3> BinaryCompactObject::create_domain() const {
             std::back_inserter(maps));
 
   // --- Outer spherical shell (10 blocks) ---
-  Maps maps_outer_shell = domain::make_vector_coordinate_map_base<
-      Frame::BlockLogical, Frame::Inertial, 3>(sph_wedge_coordinate_maps(
-      envelope_radius_, outer_radius_, 1.0, 1.0, use_equiangular_map_, true, {},
-      {radial_distribution_outer_shell_}, ShellWedges::All, opening_angle_));
+  Maps maps_outer_shell =
+      domain::make_vector_coordinate_map_base<Frame::BlockLogical,
+                                              Frame::Inertial, 3>(
+          sph_wedge_coordinate_maps(envelope_radius_, outer_radius_, 1.0, 1.0,
+                                    use_equiangular_map_, std::nullopt, true,
+                                    {}, {radial_distribution_outer_shell_},
+                                    ShellWedges::All, opening_angle_));
   std::move(maps_outer_shell.begin(), maps_outer_shell.end(),
             std::back_inserter(maps));
 
@@ -489,18 +555,21 @@ Domain<3> BinaryCompactObject::create_domain() const {
       if (use_equiangular_map_) {
         maps.emplace_back(
             make_coordinate_map_base<Frame::BlockLogical, Frame::Inertial>(
-                Equiangular3D{Equiangular(-1.0, 1.0, -1.0 * scaled_r_inner_A,
-                                          scaled_r_inner_A),
-                              Equiangular(-1.0, 1.0, -1.0 * scaled_r_inner_A,
-                                          scaled_r_inner_A),
-                              Equiangular(-1.0, 1.0, -1.0 * scaled_r_inner_A,
-                                          scaled_r_inner_A)},
+                Equiangular3D{
+                    Equiangular(-1.0, 1.0,
+                                -1.0 * scaled_r_inner_A + offset_x_coord_a_,
+                                scaled_r_inner_A + offset_x_coord_a_),
+                    Equiangular(-1.0, 1.0, -1.0 * scaled_r_inner_A,
+                                scaled_r_inner_A),
+                    Equiangular(-1.0, 1.0, -1.0 * scaled_r_inner_A,
+                                scaled_r_inner_A)},
                 translation_A));
       } else {
         maps.emplace_back(make_coordinate_map_base<Frame::BlockLogical,
                                                    Frame::Inertial>(
             Affine3D{
-                Affine(-1.0, 1.0, -1.0 * scaled_r_inner_A, scaled_r_inner_A),
+                Affine(-1.0, 1.0, -1.0 * scaled_r_inner_A + offset_x_coord_a_,
+                       scaled_r_inner_A + offset_x_coord_a_),
                 Affine(-1.0, 1.0, -1.0 * scaled_r_inner_A, scaled_r_inner_A),
                 Affine(-1.0, 1.0, -1.0 * scaled_r_inner_A, scaled_r_inner_A)},
             translation_A));
@@ -532,18 +601,21 @@ Domain<3> BinaryCompactObject::create_domain() const {
       if (use_equiangular_map_) {
         maps.emplace_back(
             make_coordinate_map_base<Frame::BlockLogical, Frame::Inertial>(
-                Equiangular3D{Equiangular(-1.0, 1.0, -1.0 * scaled_r_inner_B,
-                                          scaled_r_inner_B),
-                              Equiangular(-1.0, 1.0, -1.0 * scaled_r_inner_B,
-                                          scaled_r_inner_B),
-                              Equiangular(-1.0, 1.0, -1.0 * scaled_r_inner_B,
-                                          scaled_r_inner_B)},
+                Equiangular3D{
+                    Equiangular(-1.0, 1.0,
+                                -1.0 * scaled_r_inner_B + offset_x_coord_b_,
+                                scaled_r_inner_B + offset_x_coord_b_),
+                    Equiangular(-1.0, 1.0, -1.0 * scaled_r_inner_B,
+                                scaled_r_inner_B),
+                    Equiangular(-1.0, 1.0, -1.0 * scaled_r_inner_B,
+                                scaled_r_inner_B)},
                 translation_B));
       } else {
         maps.emplace_back(make_coordinate_map_base<Frame::BlockLogical,
                                                    Frame::Inertial>(
             Affine3D{
-                Affine(-1.0, 1.0, -1.0 * scaled_r_inner_B, scaled_r_inner_B),
+                Affine(-1.0, 1.0, -1.0 * scaled_r_inner_B + offset_x_coord_b_,
+                       scaled_r_inner_B + offset_x_coord_b_),
                 Affine(-1.0, 1.0, -1.0 * scaled_r_inner_B, scaled_r_inner_B),
                 Affine(-1.0, 1.0, -1.0 * scaled_r_inner_B, scaled_r_inner_B)},
             translation_B));
@@ -728,9 +800,10 @@ Domain<3> BinaryCompactObject::create_domain() const {
   return domain;
 }
 
+template <bool UseWorldtube>
 std::vector<DirectionMap<
     3, std::unique_ptr<domain::BoundaryConditions::BoundaryCondition>>>
-BinaryCompactObject::external_boundary_conditions() const {
+BinaryCompactObject<UseWorldtube>::external_boundary_conditions() const {
   if (outer_boundary_condition_ == nullptr) {
     return {};
   }
@@ -766,16 +839,20 @@ BinaryCompactObject::external_boundary_conditions() const {
   return boundary_conditions;
 }
 
+template <bool UseWorldtube>
 std::unordered_map<std::string,
                    std::unique_ptr<domain::FunctionsOfTime::FunctionOfTime>>
-BinaryCompactObject::functions_of_time(
+BinaryCompactObject<UseWorldtube>::functions_of_time(
     const std::unordered_map<std::string, double>& initial_expiration_times)
     const {
   return time_dependent_options_.has_value()
-             ? time_dependent_options_->create_functions_of_time(
+             ? time_dependent_options_->create_functions_of_time<UseWorldtube>(
                    initial_expiration_times)
              : std::unordered_map<
                    std::string,
                    std::unique_ptr<domain::FunctionsOfTime::FunctionOfTime>>{};
 }
+
+template class BinaryCompactObject<true>;
+template class BinaryCompactObject<false>;
 }  // namespace domain::creators

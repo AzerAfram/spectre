@@ -19,6 +19,7 @@
 #include "Domain/Creators/TimeDependentOptions/ShapeMap.hpp"
 #include "Domain/FunctionsOfTime/FixedSpeedCubic.hpp"
 #include "Domain/FunctionsOfTime/FunctionOfTime.hpp"
+#include "Domain/FunctionsOfTime/IntegratedFunctionOfTime.hpp"
 #include "Domain/FunctionsOfTime/PiecewisePolynomial.hpp"
 #include "Domain/FunctionsOfTime/QuaternionFunctionOfTime.hpp"
 #include "NumericalAlgorithms/SphericalHarmonics/Spherepack.hpp"
@@ -73,9 +74,97 @@ TimeDependentMapOptions<IsCylindrical>::TimeDependentMapOptions(
 template <bool IsCylindrical>
 std::unordered_map<std::string,
                    std::unique_ptr<domain::FunctionsOfTime::FunctionOfTime>>
+TimeDependentMapOptions<IsCylindrical>::create_worldtube_functions_of_time()
+    const {
+  if (translation_map_options_.has_value()) {
+    ERROR("Translation map is not implemented for worldtube evolutions.");
+  }
+  std::unordered_map<std::string,
+                     std::unique_ptr<domain::FunctionsOfTime::FunctionOfTime>>
+      result{};
+  // The functions of time need to be valid only for the very first time step,
+  // after that they need to be updated by the worldtube singleton.
+  const double initial_expiration_time = initial_time_ + 1e-10;
+  if (not expansion_map_options_.has_value()) {
+    ERROR("Initial values for the expansion map need to be provided.");
+  }
+  result[expansion_name] =
+      std::make_unique<FunctionsOfTime::IntegratedFunctionOfTime>(
+          initial_time_,
+          std::array<double, 2>{
+              {{gsl::at(expansion_map_options_.value().initial_values, 0)},
+               {gsl::at(expansion_map_options_.value().initial_values, 1)}}},
+          initial_expiration_time, false);
+  result[expansion_outer_boundary_name] =
+      std::make_unique<FunctionsOfTime::FixedSpeedCubic>(
+          1.0, initial_time_,
+          expansion_map_options_.value().outer_boundary_velocity,
+          expansion_map_options_.value().outer_boundary_decay_time);
+  if (not rotation_map_options_.has_value()) {
+    ERROR(
+        "Initial values for the rotation map need to be provided when using "
+        "the worldtube.");
+  }
+
+  result[rotation_name] =
+      std::make_unique<FunctionsOfTime::IntegratedFunctionOfTime>(
+          initial_time_,
+          std::array<double, 2>{
+              0.,
+              gsl::at(rotation_map_options_.value().initial_angular_velocity,
+                      2)},
+          initial_expiration_time, true);
+
+  // Size and Shape FunctionOfTime for objects A and B. Only spherical excision
+  // spheres are supported currently.
+  if (not(shape_options_A_.has_value() and shape_options_B_.has_value())) {
+    ERROR(
+        "Initial size for both excision spheres need to be provided when using "
+        "the worldtube.");
+  }
+  for (size_t i = 0; i < shape_names.size(); i++) {
+    const auto make_initial_size_values = [](const auto& lambda_options) {
+      return std::array<double, 2>{
+          {gsl::at(lambda_options.value().initial_size_values.value(), 0),
+           gsl::at(lambda_options.value().initial_size_values.value(), 1)}};
+    };
+    const std::array<double, 2> initial_size_values =
+        i == 0 ? make_initial_size_values(shape_options_A_)
+               : make_initial_size_values(shape_options_B_);
+    const size_t initial_l_max = 2;
+    const DataVector shape_zeros{
+        ylm::Spherepack::spectral_size(initial_l_max, initial_l_max), 0.0};
+
+    result[gsl::at(shape_names, i)] =
+        std::make_unique<FunctionsOfTime::PiecewisePolynomial<2>>(
+            initial_time_,
+            std::array<DataVector, 3>{shape_zeros, shape_zeros, shape_zeros},
+            std::numeric_limits<double>::infinity());
+    result[gsl::at(size_names, i)] =
+        std::make_unique<FunctionsOfTime::IntegratedFunctionOfTime>(
+            initial_time_, initial_size_values, initial_expiration_time, false);
+  }
+  return result;
+}
+
+template <bool IsCylindrical>
+template <bool UseWorldtube>
+std::unordered_map<std::string,
+                   std::unique_ptr<domain::FunctionsOfTime::FunctionOfTime>>
 TimeDependentMapOptions<IsCylindrical>::create_functions_of_time(
     const std::unordered_map<std::string, double>& initial_expiration_times)
     const {
+  if constexpr (UseWorldtube) {
+    static_assert(not IsCylindrical,
+                  "Cylindrical map not supported with worldtube");
+    if (not initial_expiration_times.empty()) {
+      ERROR(
+          "Initial expiration times were specified with worldtube functions of "
+          "time. This is not supported, as the worldtube singleton has to set "
+          "the expiration times each time step");
+    }
+    return create_worldtube_functions_of_time();
+  }
   std::unordered_map<std::string,
                      std::unique_ptr<domain::FunctionsOfTime::FunctionOfTime>>
       result{};
@@ -203,7 +292,9 @@ TimeDependentMapOptions<IsCylindrical>::create_functions_of_time(
 
 template <bool IsCylindrical>
 void TimeDependentMapOptions<IsCylindrical>::build_maps(
-    const std::array<std::array<double, 3>, 2>& centers,
+    const std::array<std::array<double, 3>, 2>& object_centers,
+    const std::optional<std::array<double, 3>>& cube_A_center,
+    const std::optional<std::array<double, 3>>& cube_B_center,
     const std::optional<std::array<double, IsCylindrical ? 2 : 3>>&
         object_A_radii,
     const std::optional<std::array<double, IsCylindrical ? 2 : 3>>&
@@ -261,23 +352,45 @@ void TimeDependentMapOptions<IsCylindrical>::build_maps(
       // Currently, we don't support different transition functions for the
       // cylindrical domain
       if constexpr (IsCylindrical) {
+        if (cube_A_center.has_value() or cube_B_center.has_value()) {
+          ERROR_NO_TRACE(
+              "When using the CylindricalBinaryCompactObject domain creator, "
+              "the excision centers cannot be offset.");
+        }
         transition_func =
             std::make_unique<domain::CoordinateMaps::
                                  ShapeMapTransitionFunctions::SphereTransition>(
                 radii[0], radii[1]);
 
-        gsl::at(shape_maps_, i) =
-            Shape{gsl::at(centers, i),     initial_l_max,
-                  initial_l_max,           std::move(transition_func),
-                  gsl::at(shape_names, i), gsl::at(size_names, i)};
+        gsl::at(shape_maps_, i) = Shape{gsl::at(object_centers, i),
+                                        initial_l_max,
+                                        initial_l_max,
+                                        std::move(transition_func),
+                                        gsl::at(shape_names, i),
+                                        gsl::at(size_names, i)};
       } else {
         // These must match the order of orientations_for_sphere_wrappings() in
-        // DomainHelpers.hpp
+        // DomainHelpers.hpp. The values must match that of Wedge::Axis
         const std::array<int, 6> axes{3, -3, 2, -2, 1, -1};
 
         const bool transition_ends_at_cube =
             i == 0 ? shape_options_A_->transition_ends_at_cube
                    : shape_options_B_->transition_ends_at_cube;
+
+        // These centers must take in to account if we have an offset of the
+        // center of the object and where the transition ends. The inner center
+        // is always the center of the object. The outer center depends on if we
+        // have an offset and where the transition ends. If the transition ends
+        // at the cube, then if we have an offset we use the cube center, if not
+        // it's the same as the object center. If the transition ends at the
+        // sphere, then the center is the object center
+        const std::optional<std::array<double, 3>>& cube_center =
+            i == 0 ? cube_A_center : cube_B_center;
+        const std::array<double, 3>& inner_center = gsl::at(object_centers, i);
+        const std::array<double, 3>& outer_center =
+            transition_ends_at_cube
+                ? cube_center.value_or(gsl::at(object_centers, i))
+                : gsl::at(object_centers, i);
 
         const double inner_sphericity = 1.0;
         const double outer_sphericity = transition_ends_at_cube ? 0.0 : 1.0;
@@ -290,14 +403,19 @@ void TimeDependentMapOptions<IsCylindrical>::build_maps(
             domain::CoordinateMaps::ShapeMapTransitionFunctions::Wedge;
         for (size_t j = 0; j < axes.size(); j++) {
           transition_func = std::make_unique<Wedge>(
-              gsl::at(centers, i), inner_radius, inner_sphericity,
-              gsl::at(centers, i), outer_radius, outer_sphericity,
+              inner_center, inner_radius, inner_sphericity, outer_center,
+              outer_radius, outer_sphericity,
               static_cast<Wedge::Axis>(gsl::at(axes, j)));
 
+          // The shape map should be given the center of the excision always,
+          // regardless of if it is offset or not
           gsl::at(gsl::at(shape_maps_, i), j) =
-              Shape{gsl::at(centers, i),     initial_l_max,
-                    initial_l_max,           std::move(transition_func),
-                    gsl::at(shape_names, i), gsl::at(size_names, i)};
+              Shape{inner_center,
+                    initial_l_max,
+                    initial_l_max,
+                    std::move(transition_func),
+                    gsl::at(shape_names, i),
+                    gsl::at(size_names, i)};
         }
       }
 
@@ -507,4 +625,17 @@ GENERATE_INSTANTIATIONS(INSTANTIATE, (true, false),
 #undef OBJECT
 #undef ISCYL
 #undef INSTANTIATE
+
+template std::unordered_map<
+    std::string, std::unique_ptr<domain::FunctionsOfTime::FunctionOfTime>>
+TimeDependentMapOptions<false>::create_functions_of_time<true>(
+    const std::unordered_map<std::string, double>&) const;
+template std::unordered_map<
+    std::string, std::unique_ptr<domain::FunctionsOfTime::FunctionOfTime>>
+TimeDependentMapOptions<false>::create_functions_of_time<false>(
+    const std::unordered_map<std::string, double>&) const;
+template std::unordered_map<
+    std::string, std::unique_ptr<domain::FunctionsOfTime::FunctionOfTime>>
+TimeDependentMapOptions<true>::create_functions_of_time<false>(
+    const std::unordered_map<std::string, double>&) const;
 }  // namespace domain::creators::bco

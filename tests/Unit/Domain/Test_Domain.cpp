@@ -1117,7 +1117,7 @@ Domain<3> create_serialized_domain() {
   const ExpandOverBlocks<std::array<size_t, 3>> expand_over_blocks{
       block_names, block_groups};
 
-  using BCO = creators::BinaryCompactObject;
+  using BCO = creators::BinaryCompactObject<false>;
 
   const BCO::InitialRefinement::type initial_refinement_variant{1_st};
   const BCO::InitialGridPoints::type initial_grid_points_variant{3_st};
@@ -1139,10 +1139,10 @@ Domain<3> create_serialized_domain() {
   using Identity2D = CoordinateMaps::Identity<2>;
   using Translation = CoordinateMaps::ProductOf2Maps<Affine, Identity2D>;
 
-  creators::BinaryCompactObject::Object object_A{0.45825, 6., 7.683, true,
-                                                 true};
-  creators::BinaryCompactObject::Object object_B{0.45825, 6., -7.683, true,
-                                                 true};
+  const creators::BinaryCompactObject<false>::Object object_A{
+      0.45825, 6., 7.683, true, true};
+  const creators::BinaryCompactObject<false>::Object object_B{
+      0.45825, 6., -7.683, true, true};
 
   const double x_coord_a = object_A.x_coord;
   const double x_coord_b = object_B.x_coord;
@@ -1169,8 +1169,8 @@ Domain<3> create_serialized_domain() {
       make_vector_coordinate_map_base<Frame::BlockLogical, Frame::Inertial, 3>(
           sph_wedge_coordinate_maps(object_A.inner_radius,
                                     object_A.outer_radius, inner_sphericity_A,
-                                    1.0, use_equiangular_map, false, {},
-                                    radial_distribution),
+                                    1.0, use_equiangular_map, std::nullopt,
+                                    false, {}, radial_distribution),
           translation_A);
   Maps maps_cube_A =
       make_vector_coordinate_map_base<Frame::BlockLogical, Frame::Inertial, 3>(
@@ -1186,8 +1186,8 @@ Domain<3> create_serialized_domain() {
       make_vector_coordinate_map_base<Frame::BlockLogical, Frame::Inertial, 3>(
           sph_wedge_coordinate_maps(object_B.inner_radius,
                                     object_B.outer_radius, inner_sphericity_B,
-                                    1.0, use_equiangular_map, false, {},
-                                    radial_distribution),
+                                    1.0, use_equiangular_map, std::nullopt,
+                                    false, {}, radial_distribution),
           translation_B);
   Maps maps_cube_B =
       make_vector_coordinate_map_base<Frame::BlockLogical, Frame::Inertial, 3>(
@@ -1215,7 +1215,7 @@ Domain<3> create_serialized_domain() {
   Maps maps_outer_shell =
       make_vector_coordinate_map_base<Frame::BlockLogical, Frame::Inertial, 3>(
           sph_wedge_coordinate_maps(envelope_radius, outer_radius, 1.0, 1.0,
-                                    use_equiangular_map, true, {},
+                                    use_equiangular_map, std::nullopt, true, {},
                                     {radial_distribution_outer_shell},
                                     ShellWedges::All, opening_angle));
   std::move(maps_outer_shell.begin(), maps_outer_shell.end(),
