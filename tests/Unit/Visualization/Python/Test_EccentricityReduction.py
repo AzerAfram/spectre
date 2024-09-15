@@ -136,7 +136,7 @@ class TestPlotTrajectories(unittest.TestCase):
         )
 
     def test_cli(self):
-        # call the spec ecc reduction function and get its output
+        # call the EccentricityControl.py and get its output which will be output of performAllFits
         # test to see if the output ecc is similar enough to self.ecc
 
 
